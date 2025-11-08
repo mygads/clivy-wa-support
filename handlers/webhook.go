@@ -28,8 +28,8 @@ type DirectWuzAPIWebhookData struct {
 // Raw map for debugging
 type WebhookRawData map[string]interface{}
 
-// GenfityWebhookData represents the incoming webhook structure from GENFITY (legacy)
-type GenfityWebhookData struct {
+// ClivyWebhookData represents the incoming webhook structure from GENFITY (legacy)
+type ClivyWebhookData struct {
 	Event     string                 `json:"event"`
 	Data      map[string]interface{} `json:"data"`
 	Timestamp string                 `json:"timestamp"`
@@ -89,7 +89,7 @@ func HandleWhatsAppWebhook(c *gin.Context) {
 	}
 
 	// Convert to legacy format for compatibility with existing processing functions
-	webhookData := GenfityWebhookData{
+	webhookData := ClivyWebhookData{
 		Event:     wuzapiData.Type,
 		Data:      wuzapiData.Event,
 		UserToken: wuzapiData.Token,
@@ -138,7 +138,7 @@ func HandleWhatsAppWebhook(c *gin.Context) {
 }
 
 // processWebhookEventWithSettings processes different types of webhook events based on user settings
-func processWebhookEventWithSettings(webhookData GenfityWebhookData, userSettings models.UserSettings) error {
+func processWebhookEventWithSettings(webhookData ClivyWebhookData, userSettings models.UserSettings) error {
 	// Always process session-related events regardless of chat log setting
 	switch webhookData.Event {
 	case "Connected", "QR", "Disconnected":
@@ -165,7 +165,7 @@ func processWebhookEventWithSettings(webhookData GenfityWebhookData, userSetting
 }
 
 // processWebhookEvent processes different types of webhook events
-func processWebhookEvent(webhookData GenfityWebhookData) error {
+func processWebhookEvent(webhookData ClivyWebhookData) error {
 	switch webhookData.Event {
 	case "Message":
 		return processMessageEvent(webhookData)
@@ -190,7 +190,7 @@ func processWebhookEvent(webhookData GenfityWebhookData) error {
 }
 
 // processMessageEvent processes message events
-func processMessageEvent(webhookData GenfityWebhookData) error {
+func processMessageEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	// Extract message info from the new format structure
@@ -412,7 +412,7 @@ func processMessageEvent(webhookData GenfityWebhookData) error {
 }
 
 // processMessageSentEvent processes message sent events (outgoing messages from our user)
-func processMessageSentEvent(webhookData GenfityWebhookData) error {
+func processMessageSentEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	// Extract message info from the new format structure
@@ -585,7 +585,7 @@ func processMessageSentEvent(webhookData GenfityWebhookData) error {
 }
 
 // processReadReceiptEvent processes read receipt events
-func processReadReceiptEvent(webhookData GenfityWebhookData) error {
+func processReadReceiptEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	// Extract info from new format structure
@@ -706,7 +706,7 @@ func processReadReceiptEvent(webhookData GenfityWebhookData) error {
 }
 
 // processPresenceEvent processes presence events
-func processPresenceEvent(webhookData GenfityWebhookData) error {
+func processPresenceEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	// Handle both WuzAPI and legacy field names
@@ -744,7 +744,7 @@ func processPresenceEvent(webhookData GenfityWebhookData) error {
 }
 
 // processChatPresenceEvent processes chat presence events
-func processChatPresenceEvent(webhookData GenfityWebhookData) error {
+func processChatPresenceEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	// Extract from new format structure
@@ -817,7 +817,7 @@ func processChatPresenceEvent(webhookData GenfityWebhookData) error {
 }
 
 // processHistorySyncEvent processes history sync events
-func processHistorySyncEvent(webhookData GenfityWebhookData) error {
+func processHistorySyncEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	syncType, _ := data["syncType"].(string)
@@ -960,7 +960,7 @@ func autoStopTyping(from, chatJid, userToken string, expirationTime time.Time) {
 }
 
 // processConnectedEvent processes connection events
-func processConnectedEvent(webhookData GenfityWebhookData) error {
+func processConnectedEvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	db := database.GetDB()
@@ -1009,7 +1009,7 @@ func processConnectedEvent(webhookData GenfityWebhookData) error {
 }
 
 // processQREvent processes QR code events
-func processQREvent(webhookData GenfityWebhookData) error {
+func processQREvent(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 
 	qrCode, _ := data["qrCodeBase64"].(string)
@@ -1313,7 +1313,7 @@ func HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "healthy",
 		"time":    time.Now().Format(time.RFC3339),
-		"service": "genfity-wa-support",
+		"service": "clivy-wa-support",
 		"version": "1.0.1",
 	})
 }
@@ -1323,13 +1323,13 @@ func HomePage(c *gin.Context) {
 	now := time.Now()
 	serverName := os.Getenv("SERVER_NAME")
 	if serverName == "" {
-		serverName = "Genfity WhatsApp Support API"
+		serverName = "Clivy WhatsApp Support API"
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":      "running",
 		"server":      serverName,
-		"service":     "genfity-wa-support",
+		"service":     "clivy-wa-support",
 		"version":     "1.0.1",
 		"time":        now.Format("2006-01-02 15:04:05"),
 		"timezone":    now.Format("MST"),
@@ -1749,7 +1749,7 @@ func SyncSessionStatus(c *gin.Context) {
 }
 
 // processMessageEventWithChatRoom processes message events and creates/updates chat room
-func processMessageEventWithChatRoom(webhookData GenfityWebhookData) error {
+func processMessageEventWithChatRoom(webhookData ClivyWebhookData) error {
 	// First process the message normally
 	if err := processMessageEvent(webhookData); err != nil {
 		return err
@@ -1760,7 +1760,7 @@ func processMessageEventWithChatRoom(webhookData GenfityWebhookData) error {
 }
 
 // processMessageSentEventWithChatRoom processes sent message events and creates/updates chat room
-func processMessageSentEventWithChatRoom(webhookData GenfityWebhookData) error {
+func processMessageSentEventWithChatRoom(webhookData ClivyWebhookData) error {
 	// First process the message normally
 	if err := processMessageSentEvent(webhookData); err != nil {
 		return err
@@ -1771,7 +1771,7 @@ func processMessageSentEventWithChatRoom(webhookData GenfityWebhookData) error {
 }
 
 // processReadReceiptEventWithChatRoom processes read receipt events and updates message status
-func processReadReceiptEventWithChatRoom(webhookData GenfityWebhookData) error {
+func processReadReceiptEventWithChatRoom(webhookData ClivyWebhookData) error {
 	// First process the read receipt normally
 	if err := processReadReceiptEvent(webhookData); err != nil {
 		return err
@@ -1782,7 +1782,7 @@ func processReadReceiptEventWithChatRoom(webhookData GenfityWebhookData) error {
 }
 
 // createChatRoomAndMessage creates/updates chat room and adds chat message
-func createChatRoomAndMessage(webhookData GenfityWebhookData, isOutgoing bool) error {
+func createChatRoomAndMessage(webhookData ClivyWebhookData, isOutgoing bool) error {
 	data := webhookData.Data
 	db := database.GetDB()
 
@@ -1934,7 +1934,7 @@ func createChatRoomAndMessage(webhookData GenfityWebhookData, isOutgoing bool) e
 }
 
 // updateChatMessageStatus updates message status in chat messages based on read receipt
-func updateChatMessageStatus(webhookData GenfityWebhookData) error {
+func updateChatMessageStatus(webhookData ClivyWebhookData) error {
 	data := webhookData.Data
 	db := database.GetDB()
 

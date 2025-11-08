@@ -1,4 +1,4 @@
-# Genfity Chat AI - WhatsApp Event API & Gateway
+# Clivy Chat AI - WhatsApp Event API & Gateway
 
 A comprehensive WhatsApp API gateway and event processing system with JWT authentication, subscription validation, image processing, contact management, and campaign-based bulk messaging capabilities.
 
