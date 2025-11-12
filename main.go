@@ -7,6 +7,7 @@ import (
 	"genfity-wa-support/database"
 	"genfity-wa-support/handlers"
 	"genfity-wa-support/middleware"
+	"genfity-wa-support/worker"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -20,6 +21,13 @@ func main() {
 
 	// Initialize database
 	database.InitDatabase()
+
+	// Start AI Worker in background goroutine
+	go func() {
+		log.Println("Starting AI Worker...")
+		aiWorker := worker.NewAIWorker()
+		aiWorker.Start()
+	}()
 
 	// Setup Gin router
 	router := gin.Default()
@@ -77,15 +85,13 @@ func main() {
 		wa.Any("/newsletter/*path", handlers.WhatsAppGateway) // Handle /wa/newsletter/...
 	}
 
-	// Original webhook routes for receiving events from WA server (separate from gateway)
-	webhooks := router.Group("/webhook")
-	{
-		wa := webhooks.Group("/wa")
-		{
-			wa.GET("", handlers.VerifyWebhook)
-			wa.POST("", handlers.HandleWhatsAppWebhook)
-		}
-	}
+	// AI webhook route - receives WhatsApp messages from WA Service for AI bot processing
+	// This is the new architecture: WA Service → /webhook/ai → AI Worker
+	router.POST("/webhook/ai", handlers.HandleAIWebhook)
+
+	// Legacy webhook routes DIHAPUS - tidak dipakai lagi di arsitektur AI bot
+	// Semua event handling sekarang dilakukan via /webhook/ai
+	// Note: Jika masih ada service lain yang kirim ke /webhook/wa, perlu diubah ke /webhook/ai
 
 	// Public cron job endpoint (no authentication required)
 	router.GET("/bulk/cron/process", handlers.BulkCampaignCronJob)
