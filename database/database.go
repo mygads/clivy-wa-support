@@ -123,12 +123,15 @@ func autoMigratePrimaryTables() error {
 		{"message_send_logs", &models.MessageSendLog{}},
 		{"ai_jobs", &models.AIJob{}},
 		{"ai_job_attempts", &models.AIJobAttempt{}},
+		{"chat_rooms", &models.ChatRoom{}},       // Chat room list for UI
+		{"chat_messages", &models.ChatMessage{}}, // Permanent chat history
 
 		// Semua data session, user settings, dan subscription ada di Transactional DB
-		// Support DB HANYA untuk:
-		// 1. Chat history (ai_chat_messages)
+		// Support DB untuk:
+		// 1. AI Chat context (ai_chat_messages - temporary)
 		// 2. Job queue (ai_jobs, ai_job_attempts)
 		// 3. Message send log (message_send_logs)
+		// 4. Permanent chat history (chat_rooms, chat_messages) - untuk UI
 	}
 
 	migratedCount := 0

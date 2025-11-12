@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +73,7 @@ func (w *AIWorker) Stop() {
 	close(w.shutdown)
 }
 
-// listenForJobs sets up PostgreSQL LISTEN for job notifications
+// listenForJobs sets up PostgreSQL LISTEN for job notifications with auto-reconnect
 func (w *AIWorker) listenForJobs() {
 	defer w.wg.Done()
 
@@ -84,11 +85,31 @@ func (w *AIWorker) listenForJobs() {
 		os.Getenv("DB_NAME"),
 	)
 
-	listener := pq.NewListener(connStr, 10*time.Second, time.Minute, func(ev pq.ListenerEventType, err error) {
-		if err != nil {
-			log.Printf("Listener error: %v", err)
+	// Callback untuk handle connection events (reconnection)
+	// Cloud PostgreSQL (Prisma Cloud) aggressively closes LISTEN connections
+	// This is expected behavior - polling fallback (2s) ensures jobs are processed
+	eventCallback := func(ev pq.ListenerEventType, err error) {
+		switch ev {
+		case pq.ListenerEventConnected:
+			log.Println("✅ [LISTEN] Connected - instant notifications enabled")
+		case pq.ListenerEventDisconnected:
+			// Silent - cloud DB will disconnect frequently, polling handles it
+			log.Println("ℹ️  [LISTEN] Disconnected (polling fallback active)")
+		case pq.ListenerEventReconnected:
+			log.Println("✅ [LISTEN] Reconnected")
+		case pq.ListenerEventConnectionAttemptFailed:
+			// Only log non-connection errors - connection failures are expected on cloud DB
+			if err != nil && !strings.Contains(err.Error(), "connection") && !strings.Contains(err.Error(), "forcibly closed") {
+				log.Printf("⚠️  [LISTEN] Error: %v (polling fallback active)\n", err)
+			}
+			// Else: silent - this is normal for cloud PostgreSQL
 		}
-	})
+	}
+
+	// Create listener with auto-reconnect:
+	// - minReconnectInterval: 10s (wait 10s before first reconnect attempt)
+	// - maxReconnectInterval: 1min (max wait between reconnect attempts)
+	listener := pq.NewListener(connStr, 10*time.Second, time.Minute, eventCallback)
 
 	err := listener.Listen("ai_jobs_channel")
 	if err != nil {
@@ -98,19 +119,29 @@ func (w *AIWorker) listenForJobs() {
 
 	log.Println("👂 Listening for AI job notifications on ai_jobs_channel...")
 
+	// Keepalive ticker - ping every 60 seconds
+	keepaliveTicker := time.NewTicker(60 * time.Second)
+	defer keepaliveTicker.Stop()
+
 	for {
 		select {
 		case <-w.shutdown:
 			log.Println("🔕 Stopping job listener...")
 			return
+
 		case notification := <-listener.Notify:
 			if notification != nil {
-				log.Println("🔔 Job notification received")
+				log.Println("⚡ [LISTEN] Instant notification - processing jobs")
 				w.processJobs()
 			}
-		case <-time.After(90 * time.Second):
-			// Ping to keep connection alive
-			go listener.Ping()
+			// notification == nil means connection was lost and reconnected
+			// pq.Listener will handle reconnection automatically
+
+		case <-keepaliveTicker.C:
+			// Send ping to keep connection alive (cloud DB will still disconnect)
+			go func() {
+				_ = listener.Ping() // Silent - ping failures are expected on cloud DB
+			}()
 		}
 	}
 }
