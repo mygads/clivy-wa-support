@@ -155,6 +155,13 @@ func HandleAIWebhook(c *gin.Context) {
 
 	log.Printf("✓ Message saved to ai_chat_messages")
 
+	// 4b. Save to permanent chat history (ChatRoom + ChatMessage)
+	go func() {
+		if err := services.SaveToChatHistory(sessionToken, from, to, body, pushName, timestamp, false); err != nil {
+			log.Printf("⚠️  Failed to save to chat history: %v", err)
+		}
+	}()
+
 	// 5. Enqueue AI job
 	aiJob := models.AIJob{
 		Status:     "pending",

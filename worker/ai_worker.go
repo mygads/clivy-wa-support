@@ -208,6 +208,13 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 		return
 	}
 
+	// 4b. Save AI response to permanent chat history
+	go func() {
+		if err := services.SaveAIResponseToHistory(job.SessionTok, chatMsg.From, response); err != nil {
+			log.Printf("⚠️  Failed to save AI response to chat history: %v", err)
+		}
+	}()
+
 	// 5. Log sent message
 	sendLog := models.MessageSendLog{
 		SessionTok: job.SessionTok,
