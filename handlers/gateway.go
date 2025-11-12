@@ -449,6 +449,20 @@ func proxyToWAServer(c *gin.Context, targetPath string) int {
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
+	// Transform request body for message endpoints (convert our format to WA server format)
+	if isMessageEndpoint(targetPath) {
+		transformedBody, err := transformMessageRequest(bodyBytes, targetPath)
+		if err != nil {
+			log.Printf("⚠️  Failed to transform request: %v", err)
+			c.JSON(http.StatusBadRequest, models.GatewayResponse{
+				Status:  http.StatusBadRequest,
+				Message: "Invalid request format",
+			})
+			return http.StatusBadRequest
+		}
+		bodyBytes = transformedBody
+	}
+
 	// Create new request to WA server using the stripped path
 	targetURL := waServerURL + targetPath
 	if c.Request.URL.RawQuery != "" {
@@ -457,7 +471,7 @@ func proxyToWAServer(c *gin.Context, targetPath string) int {
 
 	log.Printf("DEBUG: Proxying to URL: %s", targetURL)
 	log.Printf("DEBUG: Request method: %s", c.Request.Method)
-	log.Printf("DEBUG: Request body: %s", string(bodyBytes))
+	log.Printf("DEBUG: Transformed body: %s", string(bodyBytes))
 
 	req, err := http.NewRequest(c.Request.Method, targetURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
@@ -551,6 +565,73 @@ func extractMessageTypeFromPath(path string) string {
 	// Default to text if can't determine
 	return "text"
 }
+
+// transformMessageRequest converts our API format to WA server format
+// Our format: {"sessionId": "xxx", "to": "6281...", "text": "hello"}
+// WA server format: {"Phone": "6281...", "Body": "hello"}
+func transformMessageRequest(bodyBytes []byte, targetPath string) ([]byte, error) {
+	// Parse our format
+	var ourFormat map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ourFormat); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	// Convert to WA server format based on endpoint
+	waFormat := make(map[string]interface{})
+
+	// Common field: Phone (from "to" field, strip @s.whatsapp.net suffix)
+	if to, ok := ourFormat["to"].(string); ok {
+		phone := strings.TrimSuffix(to, "@s.whatsapp.net")
+		waFormat["Phone"] = phone
+	} else {
+		return nil, fmt.Errorf("missing 'to' field")
+	}
+
+	// Message type specific fields
+	messageType := extractMessageTypeFromPath(targetPath)
+	switch messageType {
+	case "text":
+		if text, ok := ourFormat["text"].(string); ok {
+			waFormat["Body"] = text
+		} else {
+			return nil, fmt.Errorf("missing 'text' field")
+		}
+	case "image", "video", "document", "audio", "sticker":
+		// For media: {"Phone": "...", "Body": "caption", "FileName": "..."}
+		if caption, ok := ourFormat["caption"].(string); ok {
+			waFormat["Body"] = caption
+		}
+		if fileName, ok := ourFormat["fileName"].(string); ok {
+			waFormat["FileName"] = fileName
+		}
+		if fileURL, ok := ourFormat["fileUrl"].(string); ok {
+			waFormat["FileURL"] = fileURL
+		}
+	case "location":
+		// {"Phone": "...", "Latitude": ..., "Longitude": ...}
+		if lat, ok := ourFormat["latitude"]; ok {
+			waFormat["Latitude"] = lat
+		}
+		if lon, ok := ourFormat["longitude"]; ok {
+			waFormat["Longitude"] = lon
+		}
+		if name, ok := ourFormat["name"].(string); ok {
+			waFormat["Name"] = name
+		}
+	case "contact":
+		// {"Phone": "...", "ContactName": "...", "ContactPhone": "..."}
+		if name, ok := ourFormat["contactName"].(string); ok {
+			waFormat["ContactName"] = name
+		}
+		if phone, ok := ourFormat["contactPhone"].(string); ok {
+			waFormat["ContactPhone"] = phone
+		}
+	}
+
+	// Marshal back to JSON
+	return json.Marshal(waFormat)
+}
+
 func trackMessageStats(userID, token, path string, c *gin.Context, success bool) {
 	// Extract message type from path
 	messageType := extractMessageTypeFromPath(path)

@@ -166,8 +166,14 @@ func autoMigratePrimaryTables() error {
 func createNotifyTrigger() error {
 	log.Println("Creating NOTIFY trigger for AI jobs queue...")
 
+	// Set statement timeout to prevent hanging
+	err := DB.Exec(`SET statement_timeout = '10s'`).Error
+	if err != nil {
+		log.Printf("⚠️  Warning: Could not set statement timeout: %v", err)
+	}
+
 	// Create function for NOTIFY
-	err := DB.Exec(`
+	err = DB.Exec(`
 		CREATE OR REPLACE FUNCTION notify_ai_job_insert()
 		RETURNS TRIGGER AS $$
 		BEGIN
@@ -177,7 +183,11 @@ func createNotifyTrigger() error {
 		$$ LANGUAGE plpgsql;
 	`).Error
 	if err != nil {
-		return fmt.Errorf("failed to create notify function: %v", err)
+		log.Printf("⚠️  Warning: Failed to create notify function (might not have permission): %v", err)
+		log.Println("⚠️  NOTIFY trigger skipped - worker will use polling only")
+		// Reset timeout
+		DB.Exec(`RESET statement_timeout`)
+		return nil // Don't fail, just skip trigger
 	}
 
 	// Drop existing trigger if exists
@@ -185,7 +195,7 @@ func createNotifyTrigger() error {
 		DROP TRIGGER IF EXISTS ai_jobs_insert_trigger ON ai_jobs;
 	`).Error
 	if err != nil {
-		return fmt.Errorf("failed to drop existing trigger: %v", err)
+		log.Printf("⚠️  Warning: Failed to drop existing trigger: %v", err)
 	}
 
 	// Create trigger
@@ -196,8 +206,15 @@ func createNotifyTrigger() error {
 		EXECUTE FUNCTION notify_ai_job_insert();
 	`).Error
 	if err != nil {
-		return fmt.Errorf("failed to create trigger: %v", err)
+		log.Printf("⚠️  Warning: Failed to create trigger (might not have permission): %v", err)
+		log.Println("⚠️  NOTIFY trigger skipped - worker will use polling only")
+		// Reset timeout
+		DB.Exec(`RESET statement_timeout`)
+		return nil // Don't fail, just skip trigger
 	}
+
+	// Reset timeout
+	DB.Exec(`RESET statement_timeout`)
 
 	log.Println("✓ NOTIFY trigger created successfully for ai_jobs_channel")
 	return nil

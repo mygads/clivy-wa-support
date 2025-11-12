@@ -1,9 +1,14 @@
-# Build stage
+# ============================================
+# Stage 1: Builder
+# ============================================
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-# Copy go mod and sum files
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Copy go mod files
 COPY go.mod go.sum ./
 
 # Download dependencies
@@ -15,19 +20,38 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
 
-# Final stage
+# ============================================
+# Stage 2: Runner
+# ============================================
 FROM alpine:latest
 
-# Install runtime dependencies including wget for health checks
-RUN apk --no-cache add ca-certificates wget curl postgresql-client
+WORKDIR /app
 
-WORKDIR /root/
+# Install runtime dependencies
+RUN apk --no-cache add ca-certificates tzdata curl bash postgresql-client
 
-# Copy the binary from builder stage
+# Copy the binary from builder
 COPY --from=builder /app/main .
 
-# Expose port
-EXPOSE 8081
+# Create directories for sessions and logs
+RUN mkdir -p /app/sessions /app/logs
 
-# Command to run
-CMD ["./main"]
+# Create non-root user
+RUN addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8070
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:8070/health || exit 1
+
+# Run the application
+CMD ["./main", "rest"]

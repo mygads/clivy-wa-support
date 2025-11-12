@@ -1,13 +1,8 @@
 package services
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"os"
-	"time"
 
 	"genfity-wa-support/database"
 	"genfity-wa-support/models"
@@ -40,8 +35,13 @@ func BuildContext(userID, sessionToken, messageID string) (*ContextData, error) 
 
 // BuildContextWithLimit builds context with dynamic message limit
 func BuildContextWithLimit(userID, sessionToken, messageID string, maxMessages int) (*ContextData, error) {
-	// 1. Fetch bot settings dari Transactional DB
-	botSettings, err := fetchBotSettings(userID, sessionToken)
+	// 1. Fetch bot settings using data provider (respects DATA_ACCESS_MODE env)
+	provider, err := GetDataProvider()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get data provider: %w", err)
+	}
+
+	botSettings, err := provider.GetBotSettings(userID, sessionToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch bot settings: %w", err)
 	}
@@ -61,6 +61,12 @@ func BuildContextWithLimit(userID, sessionToken, messageID string, maxMessages i
 	systemPrompt := botSettings.SystemPrompt
 	if systemPrompt == "" {
 		systemPrompt = "Anda adalah customer service yang ramah dan profesional."
+		log.Printf("⚠️  Using default system prompt (no custom prompt found)")
+	} else {
+		log.Printf("✅ Using custom system prompt: %d chars", len(systemPrompt))
+		// Show first 300 chars of system prompt for debugging
+		previewLen := min(300, len(systemPrompt))
+		log.Printf("📝 System prompt preview: %s...", systemPrompt[:previewLen])
 	}
 
 	// Add knowledge base (limit to first 5 docs if too many)
@@ -118,34 +124,4 @@ func BuildContextWithLimit(userID, sessionToken, messageID string, maxMessages i
 		SystemPrompt: systemPrompt,
 		UserMessage:  currentMsg.Body,
 	}, nil
-}
-
-// fetchBotSettings calls Transactional API to get bot configuration
-func fetchBotSettings(userID, sessionToken string) (*BotSettings, error) {
-	transactionalURL := os.Getenv("TRANSACTIONAL_API_URL")
-	if transactionalURL == "" {
-		transactionalURL = "http://localhost:8090/api"
-	}
-
-	url := fmt.Sprintf("%s/whatsapp/bot/settings?userId=%s&sessionToken=%s",
-		transactionalURL, userID, sessionToken)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, body)
-	}
-
-	var settings BotSettings
-	if err := json.NewDecoder(resp.Body).Decode(&settings); err != nil {
-		return nil, err
-	}
-
-	return &settings, nil
 }

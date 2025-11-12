@@ -81,27 +81,45 @@ func (p *DBProvider) ResolveSession(instanceName string) (*SessionInfo, error) {
 		return nil, fmt.Errorf("session has no user")
 	}
 
-	// Check if bot is active for this user
+	// Check if bot is active for this session
+	// Note: AIBotSessionBinding.sessionId refers to WhatsAppSession.id (not sessionId field)
+	// Use quoted column names because Prisma uses camelCase
 	var botBinding models.AIBotSessionBinding
 	botActive := false
-	err := db.Where("sessionId = ? AND isActive = ?", session.SessionID, true).
+
+	log.Printf("🔍 Checking bot binding for session.ID: %s", session.ID)
+
+	err := db.Where(`"sessionId" = ? AND "isActive" = ?`, session.ID, true).
 		First(&botBinding).Error
 	if err == nil {
+		log.Printf("✓ Bot binding found: botID=%s", botBinding.BotID)
 		// Binding exists, now check if bot is active
 		var bot models.WhatsAppAIBot
-		if err := db.Where("id = ? AND isActive = ?", botBinding.BotID, true).First(&bot).Error; err == nil {
+		if err := db.Where(`"id" = ? AND "isActive" = ?`, botBinding.BotID, true).First(&bot).Error; err == nil {
 			botActive = true
+			log.Printf("✓ Bot is active: name=%s", bot.Name)
+		} else {
+			log.Printf("❌ Bot not active or not found: %v", err)
 		}
+	} else {
+		log.Printf("❌ No bot binding found: %v", err)
 	}
 
 	// Check subscription status
+	// Use quoted column names for Prisma camelCase columns
 	var subscription models.ServicesWhatsappCustomers
 	subscriptionActive := false
-	err = db.Where("customerId = ? AND status = ? AND expiredAt > ?",
+
+	log.Printf("🔍 Checking subscription for userID: %s", *session.UserID)
+
+	err = db.Where(`"customerId" = ? AND "status" = ? AND "expiredAt" > ?`,
 		*session.UserID, "active", time.Now()).
 		First(&subscription).Error
 	if err == nil {
 		subscriptionActive = true
+		log.Printf("✓ Subscription active: expires=%s", subscription.ExpiredAt)
+	} else {
+		log.Printf("❌ No active subscription found: %v", err)
 	}
 
 	return &SessionInfo{
@@ -120,15 +138,15 @@ func (p *DBProvider) GetBotSettings(userID, sessionToken string) (*BotSettings, 
 
 	db := database.GetTransactionalDB()
 
-	// Get bot by userId
+	// Get bot by userId (use quoted column names for Prisma camelCase)
 	var bot models.WhatsAppAIBot
-	if err := db.Where("userId = ? AND isActive = ?", userID, true).First(&bot).Error; err != nil {
+	if err := db.Where(`"userId" = ? AND "isActive" = ?`, userID, true).First(&bot).Error; err != nil {
 		return nil, fmt.Errorf("bot not found or inactive: %w", err)
 	}
 
-	// Get active documents
+	// Get active documents (use quoted column names)
 	var dbDocs []models.AIDocument
-	if err := db.Where("userId = ? AND isActive = ?", userID, true).Find(&dbDocs).Error; err != nil {
+	if err := db.Where(`"userId" = ? AND "isActive" = ?`, userID, true).Find(&dbDocs).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch documents: %w", err)
 	}
 
@@ -145,6 +163,10 @@ func (p *DBProvider) GetBotSettings(userID, sessionToken string) (*BotSettings, 
 	systemPrompt := ""
 	if bot.SystemPrompt != nil {
 		systemPrompt = *bot.SystemPrompt
+		log.Printf("✅ Bot settings loaded: botID=%s, promptLength=%d chars, docs=%d",
+			bot.ID, len(systemPrompt), len(documents))
+	} else {
+		log.Printf("⚠️  No system prompt found for bot: %s", bot.ID)
 	}
 
 	fallbackText := ""

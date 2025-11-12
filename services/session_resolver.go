@@ -1,12 +1,7 @@
 package services
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"time"
+	"log"
 )
 
 // SessionInfo holds user and bot configuration from transactional DB
@@ -17,31 +12,28 @@ type SessionInfo struct {
 	SessionToken       string `json:"sessionToken"`
 }
 
-// ResolveSession calls Transactional API to get user and bot info
-func ResolveSession(sessionToken string) (*SessionInfo, error) {
-	transactionalURL := os.Getenv("TRANSACTIONAL_API_URL")
-	if transactionalURL == "" {
-		transactionalURL = "http://localhost:8090/api"
-	}
+// Global data provider instance
+var dataProvider DataProvider
 
-	url := fmt.Sprintf("%s/whatsapp/session/resolve?token=%s", transactionalURL, sessionToken)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+// InitDataProvider initializes the data provider based on config
+func InitDataProvider() error {
+	provider, err := GetDataProvider()
 	if err != nil {
-		return nil, fmt.Errorf("failed to call transactional API: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
+	dataProvider = provider
+	log.Printf("✅ Data provider initialized in mode: %T", dataProvider)
+	return nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, body)
+// ResolveSession calls appropriate data provider to get user and bot info
+func ResolveSession(sessionToken string) (*SessionInfo, error) {
+	if dataProvider == nil {
+		// Fallback: initialize if not done yet
+		if err := InitDataProvider(); err != nil {
+			return nil, err
+		}
 	}
 
-	var info SessionInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &info, nil
+	return dataProvider.ResolveSession(sessionToken)
 }

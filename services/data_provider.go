@@ -1,6 +1,7 @@
 package services
 
 import (
+	"log"
 	"os"
 )
 
@@ -39,10 +40,14 @@ func GetDataProvider() (DataProvider, error) {
 		mode = "api" // Default to API mode (safer)
 	}
 
+	log.Printf("🔧 Data access mode: %s", mode)
+
 	if mode == "direct" {
+		log.Println("📊 Using DIRECT database access mode")
 		return NewDBProvider()
 	}
 
 	// Default to API mode
+	log.Println("🌐 Using API access mode")
 	return NewAPIProvider(), nil
 }

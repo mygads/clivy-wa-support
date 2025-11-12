@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,9 @@ type SendTextRequest struct {
 // - Track message stats ke DB Transactional
 // - Proxy ke WA Server (port 8080)
 func SendWAText(sessionToken, to, text string) error {
+	// Clean text: remove leading newlines to avoid double spacing in WhatsApp
+	text = strings.TrimLeft(text, "\n")
+
 	// Call internal gateway endpoint (localhost:8070/wa/chat/send/text)
 	// Gateway sudah handle semua validasi dan tracking
 	url := "http://localhost:8070/wa/chat/send/text"

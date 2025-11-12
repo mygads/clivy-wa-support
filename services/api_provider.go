@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -42,6 +43,13 @@ func (p *APIProvider) ResolveSession(instanceName string) (*SessionInfo, error) 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Debug logging
+	log.Printf("🔑 Making request to: %s", url)
+	log.Printf("🔑 API Key configured: %v (length: %d)", p.apiKey != "", len(p.apiKey))
+	if p.apiKey != "" {
+		log.Printf("🔑 API Key preview: %s...", p.apiKey[:10])
 	}
 
 	// Add internal API key if configured

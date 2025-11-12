@@ -1,13 +1,10 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -201,6 +198,10 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 		w.failJob(job, &attempt, fmt.Sprintf("Context build failed: %v", err))
 		return
 	}
+
+	// Log system prompt preview for debugging
+	log.Printf("🤖 System prompt to LLM (first 400 chars): %s...", ctx.SystemPrompt[:min(400, len(ctx.SystemPrompt))])
+	log.Printf("💬 User message to LLM: %s", ctx.UserMessage)
 
 	// 2. Call LLM with timeout and circuit breaker
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -448,52 +449,29 @@ func (w *AIWorker) failJob(job *models.AIJob, attempt *models.AIJobAttempt, errM
 	w.db.Model(job).Updates(updates)
 }
 
-// logUsage logs AI usage to Transactional DB via API (async)
+// logUsage logs AI usage to Transactional DB via data provider (async)
 func (w *AIWorker) logUsage(userID, sessionID string, inputTokens, outputTokens, latencyMs int, status, errorReason string) {
-	transactionalURL := os.Getenv("TRANSACTIONAL_API_URL")
-	if transactionalURL == "" {
-		transactionalURL = "http://localhost:8090/api"
-	}
-
-	apiKey := os.Getenv("INTERNAL_API_KEY")
-	if apiKey == "" {
-		log.Println("⚠️  INTERNAL_API_KEY not set, skipping usage log")
+	// Get data provider
+	provider, err := services.GetDataProvider()
+	if err != nil {
+		log.Printf("⚠️  Failed to get data provider for usage log: %v", err)
 		return
 	}
 
-	url := fmt.Sprintf("%s/customer/ai/usage", transactionalURL)
-
-	payload := map[string]interface{}{
-		"userId":       userID,
-		"sessionId":    sessionID,
-		"inputTokens":  inputTokens,
-		"outputTokens": outputTokens,
-		"latencyMs":    latencyMs,
-		"status":       status,
-		"errorReason":  errorReason,
+	// Prepare usage log request
+	logReq := &services.UsageLogRequest{
+		UserID:       userID,
+		SessionID:    sessionID,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+		LatencyMs:    latencyMs,
+		Status:       status,
+		ErrorReason:  errorReason,
 	}
 
-	jsonData, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Printf("⚠️  Failed to create usage log request: %v", err)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
+	// Log usage via provider (API or Direct DB)
+	if err := provider.LogUsage(logReq); err != nil {
 		log.Printf("⚠️  Failed to log AI usage: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 201 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("⚠️  Usage log API returned %d: %s", resp.StatusCode, body)
 	}
 }

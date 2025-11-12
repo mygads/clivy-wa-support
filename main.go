@@ -22,11 +22,30 @@ import (
 func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using system environment variables")
+		log.Println("⚠️  No .env file found, using system environment variables")
+	} else {
+		log.Println("✅ .env file loaded successfully")
 	}
+
+	// Debug: Print critical environment variables
+	log.Printf("🔧 DATA_ACCESS_MODE: %s", os.Getenv("DATA_ACCESS_MODE"))
+	log.Printf("🔧 TRANSACTIONAL_API_URL: %s", os.Getenv("TRANSACTIONAL_API_URL"))
+	log.Printf("🔧 INTERNAL_API_KEY: %s", func() string {
+		key := os.Getenv("INTERNAL_API_KEY")
+		if len(key) > 10 {
+			return key[:10] + "..."
+		}
+		return key
+	}())
 
 	// Initialize database
 	database.InitDatabase()
+
+	// Initialize data provider (API or Direct DB mode)
+	log.Println("🔧 Initializing data provider...")
+	if err := services.InitDataProvider(); err != nil {
+		log.Fatalf("❌ Failed to initialize data provider: %v", err)
+	}
 
 	// Start OpenRouter Credit Monitor in background
 	log.Println("🔍 Starting OpenRouter credit monitor...")
