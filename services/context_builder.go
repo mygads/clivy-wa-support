@@ -18,15 +18,18 @@ type ContextData struct {
 	UserMessage  string
 }
 
+// Document represents knowledge base document
+type Document struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	Kind    string `json:"kind"`
+}
+
 // BotSettings holds bot configuration from transactional DB
 type BotSettings struct {
-	SystemPrompt string `json:"systemPrompt"`
-	FallbackText string `json:"fallbackText"`
-	Documents    []struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-		Kind    string `json:"kind"`
-	} `json:"documents"`
+	SystemPrompt string     `json:"systemPrompt"`
+	FallbackText string     `json:"fallbackText"`
+	Documents    []Document `json:"documents"`
 }
 
 // BuildContext fetches bot settings and builds context for LLM
