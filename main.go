@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"genfity-wa-support/database"
 	"genfity-wa-support/handlers"
 	"genfity-wa-support/middleware"
+	"genfity-wa-support/services"
 	"genfity-wa-support/worker"
 
 	"github.com/gin-gonic/gin"
@@ -22,10 +28,14 @@ func main() {
 	// Initialize database
 	database.InitDatabase()
 
-	// Start AI Worker in background goroutine
+	// Start OpenRouter Credit Monitor in background
+	log.Println("🔍 Starting OpenRouter credit monitor...")
+	go services.MonitorCredits()
+
+	// Start AI Worker in background with graceful shutdown support
+	aiWorker := worker.NewAIWorker()
 	go func() {
 		log.Println("Starting AI Worker...")
-		aiWorker := worker.NewAIWorker()
 		aiWorker.Start()
 	}()
 
@@ -91,7 +101,7 @@ func main() {
 
 	// Legacy webhook routes DIHAPUS - tidak dipakai lagi di arsitektur AI bot
 	// Semua event handling sekarang dilakukan via /webhook/ai
-	// Note: Jika masih ada service lain yang kirim ke /webhook/wa, perlu diubah ke /webhook/ai
+	// Note: Jika masih ada service lain yang kirim ke /webhook/ai, perlu diubah ke /webhook/ai
 
 	// Public cron job endpoint (no authentication required)
 	router.GET("/bulk/cron/process", handlers.BulkCampaignCronJob)
@@ -129,9 +139,40 @@ func main() {
 		port = "8070"
 	}
 
-	log.Printf("Server starting on port %s", port)
-	log.Printf("Gateway mode: %s", os.Getenv("GATEWAY_MODE"))
-	if err := router.Run(":" + port); err != nil {
-		log.Fatal("Failed to start server:", err)
+	// Setup HTTP server with graceful shutdown
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: router,
 	}
+
+	// Channel to listen for interrupt signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("🚀 Server starting on port %s", port)
+		log.Printf("📡 Gateway mode: %s", os.Getenv("GATEWAY_MODE"))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-quit
+	log.Println("🛑 Shutting down server...")
+
+	// Stop AI Worker first
+	log.Println("🤖 Stopping AI Worker...")
+	aiWorker.Stop()
+
+	// Give a deadline for HTTP server shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("✅ Server exited gracefully")
 }

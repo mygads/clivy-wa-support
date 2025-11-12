@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -32,20 +33,25 @@ type BotSettings struct {
 	Documents    []Document `json:"documents"`
 }
 
-// BuildContext fetches bot settings and builds context for LLM
+// BuildContext fetches bot settings and builds context for LLM with default limit (10 messages)
 func BuildContext(userID, sessionToken, messageID string) (*ContextData, error) {
+	return BuildContextWithLimit(userID, sessionToken, messageID, 10)
+}
+
+// BuildContextWithLimit builds context with dynamic message limit
+func BuildContextWithLimit(userID, sessionToken, messageID string, maxMessages int) (*ContextData, error) {
 	// 1. Fetch bot settings dari Transactional DB
 	botSettings, err := fetchBotSettings(userID, sessionToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch bot settings: %w", err)
 	}
 
-	// 2. Fetch chat history (last 10 messages)
+	// 2. Fetch chat history with dynamic limit
 	db := database.GetDB()
 	var messages []models.AIChatMessage
 	err = db.Where("session_tok = ?", sessionToken).
 		Order("timestamp DESC").
-		Limit(10).
+		Limit(maxMessages).
 		Find(&messages).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch chat history: %w", err)
@@ -57,11 +63,23 @@ func BuildContext(userID, sessionToken, messageID string) (*ContextData, error) 
 		systemPrompt = "Anda adalah customer service yang ramah dan profesional."
 	}
 
-	// Add knowledge base
+	// Add knowledge base (limit to first 5 docs if too many)
+	knowledgeLimit := 5
+	if len(botSettings.Documents) > knowledgeLimit {
+		log.Printf("⚠️  Limiting knowledge base to %d docs (total: %d)",
+			knowledgeLimit, len(botSettings.Documents))
+		botSettings.Documents = botSettings.Documents[:knowledgeLimit]
+	}
+
 	if len(botSettings.Documents) > 0 {
 		systemPrompt += "\n\n=== Knowledge Base ===\n"
 		for _, doc := range botSettings.Documents {
-			systemPrompt += fmt.Sprintf("\n[%s - %s]\n%s\n", doc.Kind, doc.Title, doc.Content)
+			// Limit doc content to 500 characters
+			content := doc.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			systemPrompt += fmt.Sprintf("\n[%s - %s]\n%s\n", doc.Kind, doc.Title, content)
 		}
 	}
 
@@ -75,7 +93,12 @@ func BuildContext(userID, sessionToken, messageID string) (*ContextData, error) 
 			if msg.FromMe {
 				role = "Assistant"
 			}
-			systemPrompt += fmt.Sprintf("%s: %s\n", role, msg.Body)
+			// Limit message body to 200 characters
+			body := msg.Body
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			systemPrompt += fmt.Sprintf("%s: %s\n", role, body)
 		}
 	}
 
@@ -85,6 +108,11 @@ func BuildContext(userID, sessionToken, messageID string) (*ContextData, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch current message: %w", err)
 	}
+
+	// Estimate token count (rough: 1 token ≈ 4 chars)
+	estimatedTokens := (len(systemPrompt) + len(currentMsg.Body)) / 4
+	log.Printf("📊 Context size: ~%d tokens (system: %d chars, user: %d chars, messages: %d)",
+		estimatedTokens, len(systemPrompt), len(currentMsg.Body), maxMessages)
 
 	return &ContextData{
 		SystemPrompt: systemPrompt,

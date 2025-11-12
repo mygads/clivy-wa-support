@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"genfity-wa-support/database"
@@ -20,11 +21,16 @@ import (
 	"gorm.io/gorm"
 )
 
+// Global circuit breaker for OpenRouter
+var openRouterCB = services.NewCircuitBreaker("openrouter", 5, 60*time.Second)
+
 // AIWorker processes AI jobs from queue
 type AIWorker struct {
 	llmClient *openai.Client
 	db        *gorm.DB
 	listener  *pq.Listener
+	shutdown  chan struct{}
+	wg        sync.WaitGroup
 }
 
 // NewAIWorker creates new AI worker instance
@@ -32,6 +38,7 @@ func NewAIWorker() *AIWorker {
 	return &AIWorker{
 		llmClient: services.NewOpenRouterClient(),
 		db:        database.GetDB(),
+		shutdown:  make(chan struct{}),
 	}
 }
 
@@ -40,19 +47,35 @@ func (w *AIWorker) Start() {
 	log.Println("🤖 AI Worker started")
 
 	// Setup LISTEN for real-time notifications
+	w.wg.Add(1)
 	go w.listenForJobs()
 
 	// Fallback polling (every 2 seconds if no notifications)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		w.processJobs()
+	for {
+		select {
+		case <-w.shutdown:
+			log.Println("🛑 AI Worker shutting down...")
+			w.wg.Wait() // Wait for listener to finish
+			log.Println("✅ AI Worker stopped")
+			return
+		case <-ticker.C:
+			w.processJobs()
+		}
 	}
+}
+
+// Stop signals worker to shutdown gracefully
+func (w *AIWorker) Stop() {
+	close(w.shutdown)
 }
 
 // listenForJobs sets up PostgreSQL LISTEN for job notifications
 func (w *AIWorker) listenForJobs() {
+	defer w.wg.Done()
+
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		os.Getenv("DB_HOST"),
 		os.Getenv("DB_PORT"),
@@ -71,11 +94,15 @@ func (w *AIWorker) listenForJobs() {
 	if err != nil {
 		log.Fatalf("Failed to listen on ai_jobs_channel: %v", err)
 	}
+	defer listener.Close()
 
 	log.Println("👂 Listening for AI job notifications on ai_jobs_channel...")
 
 	for {
 		select {
+		case <-w.shutdown:
+			log.Println("🔕 Stopping job listener...")
+			return
 		case notification := <-listener.Notify:
 			if notification != nil {
 				log.Println("🔔 Job notification received")
@@ -137,19 +164,30 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	w.db.Create(&attempt)
 
 	// 1. Build context (fetch bot settings + chat history)
-	ctx, err := services.BuildContext(job.UserID, job.SessionTok, job.MessageID)
+	maxMessages := 10
+	ctx, err := services.BuildContextWithLimit(job.UserID, job.SessionTok, job.MessageID, maxMessages)
 	if err != nil {
 		w.failJob(job, &attempt, fmt.Sprintf("Context build failed: %v", err))
 		return
 	}
 
-	// 2. Call LLM with timeout
+	// 2. Call LLM with timeout and circuit breaker
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	response, inTok, outTok, err := services.AskLLM(timeoutCtx, w.llmClient, ctx.SystemPrompt, ctx.UserMessage)
-	if err != nil {
-		w.failJob(job, &attempt, fmt.Sprintf("LLM call failed: %v", err))
+	var response string
+	var inTok, outTok int
+
+	// Use circuit breaker to prevent cascading failures
+	cbErr := openRouterCB.Call(func() error {
+		var llmErr error
+		response, inTok, outTok, llmErr = services.AskLLM(timeoutCtx, w.llmClient, ctx.SystemPrompt, ctx.UserMessage)
+		return llmErr
+	})
+
+	if cbErr != nil {
+		// Parse error for intelligent handling
+		w.handleLLMError(job, &attempt, cbErr, maxMessages)
 		return
 	}
 
@@ -207,6 +245,134 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 
 	// Log to Transactional DB (AIUsageLog) - async, don't block on error
 	go w.logUsage(job.UserID, job.SessionTok, inTok, outTok, int(latency), "ok", "")
+}
+
+// handleLLMError handles LLM errors with intelligent retry logic
+func (w *AIWorker) handleLLMError(job *models.AIJob, attempt *models.AIJobAttempt, err error, currentMaxMessages int) {
+	log.Printf("🔍 Analyzing error for job #%d: %v", job.ID, err)
+
+	// Parse as OpenRouter error
+	orErr := services.ParseSDKError(err)
+
+	// Check if it's a context length error and we can retry with smaller context
+	if orErr.IsContextLengthError() && currentMaxMessages > 5 {
+		log.Printf("📏 Context too long, retrying job #%d with 5 messages instead of %d", job.ID, currentMaxMessages)
+
+		// Retry with smaller context
+		start := time.Now()
+		smallerCtx, ctxErr := services.BuildContextWithLimit(job.UserID, job.SessionTok, job.MessageID, 5)
+		if ctxErr != nil {
+			w.permanentFailJob(job, attempt, fmt.Sprintf("Context build failed even with 5 messages: %v", ctxErr))
+			return
+		}
+
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		var response string
+		var inTok, outTok int
+
+		cbErr := openRouterCB.Call(func() error {
+			var llmErr error
+			response, inTok, outTok, llmErr = services.AskLLM(timeoutCtx, w.llmClient, smallerCtx.SystemPrompt, smallerCtx.UserMessage)
+			return llmErr
+		})
+
+		if cbErr != nil {
+			// Still failed, handle normally
+			w.handleLLMError(job, attempt, cbErr, 5)
+			return
+		}
+
+		// Success! Complete the job
+		latency := time.Since(start).Milliseconds()
+
+		var chatMsg models.AIChatMessage
+		if err := w.db.Where("message_id = ?", job.MessageID).First(&chatMsg).Error; err != nil {
+			w.failJob(job, attempt, fmt.Sprintf("Failed to fetch chat message: %v", err))
+			return
+		}
+
+		if err := services.SendWAText(job.SessionTok, chatMsg.From, response); err != nil {
+			w.failJob(job, attempt, fmt.Sprintf("Failed to send WA message: %v", err))
+			return
+		}
+
+		sendLog := models.MessageSendLog{
+			SessionTok: job.SessionTok,
+			To:         chatMsg.From,
+			Body:       response,
+			Status:     "sent",
+			CreatedAt:  time.Now(),
+		}
+		w.db.Create(&sendLog)
+
+		outputData := map[string]interface{}{
+			"response":      response,
+			"input_tokens":  inTok,
+			"output_tokens": outTok,
+			"latency_ms":    latency,
+		}
+		outputJSON, _ := json.Marshal(outputData)
+
+		now := time.Now()
+		w.db.Model(job).Updates(map[string]interface{}{
+			"status":      "done",
+			"output_json": string(outputJSON),
+			"updated_at":  now,
+		})
+
+		w.db.Model(attempt).Updates(map[string]interface{}{
+			"status":   "ok",
+			"ended_at": now,
+		})
+
+		log.Printf("✅ Job #%d completed with smaller context in %dms (tokens: %d in, %d out)",
+			job.ID, latency, inTok, outTok)
+
+		go w.logUsage(job.UserID, job.SessionTok, inTok, outTok, int(latency), "ok", "")
+		return
+	}
+
+	// Check if error is permanent (non-retryable)
+	if orErr.IsAuthError() || orErr.IsPaymentError() || orErr.IsModerationError() {
+		w.permanentFailJob(job, attempt, fmt.Sprintf("%d: %s", orErr.Code, orErr.Message))
+		return
+	}
+
+	// Check if we should retry
+	if !orErr.IsRetryable() {
+		w.permanentFailJob(job, attempt, fmt.Sprintf("Non-retryable error: %d - %s", orErr.Code, orErr.Message))
+		return
+	}
+
+	// Retryable error - use normal retry logic
+	errMsg := fmt.Sprintf("LLM call failed (%d): %s", orErr.Code, orErr.Message)
+	w.failJob(job, attempt, errMsg)
+}
+
+// permanentFailJob marks job as permanently failed (no retry)
+func (w *AIWorker) permanentFailJob(job *models.AIJob, attempt *models.AIJobAttempt, errMsg string) {
+	log.Printf("🚫 Job #%d permanently failed: %s", job.ID, errMsg)
+
+	now := time.Now()
+
+	// Update attempt
+	w.db.Model(attempt).Updates(map[string]interface{}{
+		"status":    "error",
+		"ended_at":  now,
+		"error_msg": errMsg,
+	})
+
+	// Mark job as failed (no retry)
+	w.db.Model(job).Updates(map[string]interface{}{
+		"status":     "failed",
+		"error_msg":  errMsg,
+		"updated_at": now,
+	})
+
+	// Log to usage with error status
+	go w.logUsage(job.UserID, job.SessionTok, 0, 0, 0, "error", errMsg)
 }
 
 // failJob marks job as failed with retry logic

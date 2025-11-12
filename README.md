@@ -41,6 +41,13 @@ A comprehensive WhatsApp API gateway and event processing system with JWT authen
 - **[Quick Start Guide](./QUICK_START_GUIDE.md)** - Step-by-step usage guide
 - **[Usage Examples](./USAGE_EXAMPLES.md)** - JavaScript/Python code examples
 
+### AI Bot Documentation
+- **[OpenRouter Configuration Guide](./docs/openrouter-config.md)** - Comprehensive OpenRouter setup and optimization
+- **[OpenRouter Quick Start](./docs/openrouter-quickstart.md)** - Quick reference for OpenRouter API
+- **[OpenRouter Error Handling](./docs/openrouter-errors.md)** - Error handling and rate limits guide
+- **[Responses API Beta](./docs/openrouter-responses-api-beta.md)** - Beta API comparison and migration guide
+- **[Code Improvements](./docs/code-improvements.md)** - Recommended code enhancements and optimizations
+
 ### Additional Documentation
 - **[Contact Sync API](./CONTACT_SYNC_API.md)** - Contact management endpoints
 - **[Webhook Documentation](./WEBHOOK_DOCUMENTATION.md)** - Webhook handling
