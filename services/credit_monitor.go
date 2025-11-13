@@ -102,10 +102,10 @@ func logCreditInfo(info *CreditInfo) {
 			info.Data.UsageWeekly,
 			info.Data.UsageMonthly)
 	} else {
-		log.Printf("💰 [CreditMonitor] Daily: $%.4f | Weekly: $%.4f | Monthly: $%.4f | Total: $%.4f",
-			info.Data.UsageDaily,
-			info.Data.UsageWeekly,
-			info.Data.UsageMonthly,
-			info.Data.Usage)
+		// log.Printf("💰 [CreditMonitor] Daily: $%.4f | Weekly: $%.4f | Monthly: $%.4f | Total: $%.4f",
+		// 	info.Data.UsageDaily,
+		// 	info.Data.UsageWeekly,
+		// 	info.Data.UsageMonthly,
+		// 	info.Data.Usage)
 	}
 }
