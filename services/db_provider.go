@@ -49,6 +49,7 @@ func (p *DBProvider) verifyTablesExist() error {
 		"AIDocument",
 		"AIUsageLog",
 		"AIBotSessionBinding",
+		"BotKnowledgeBinding",
 	}
 
 	for _, table := range requiredTables {
@@ -144,10 +145,17 @@ func (p *DBProvider) GetBotSettings(userID, sessionToken string) (*BotSettings, 
 		return nil, fmt.Errorf("bot not found or inactive: %w", err)
 	}
 
-	// Get active documents (use quoted column names)
+	// Get ONLY documents bound to this bot via BotKnowledgeBinding (many-to-many)
 	var dbDocs []models.AIDocument
-	if err := db.Where(`"userId" = ? AND "isActive" = ?`, userID, true).Find(&dbDocs).Error; err != nil {
-		return nil, fmt.Errorf("failed to fetch documents: %w", err)
+	query := `
+		SELECT d.* FROM "AIDocument" d
+		INNER JOIN "BotKnowledgeBinding" b ON d.id = b."documentId"
+		WHERE b."botId" = ? AND b."isActive" = true AND d."isActive" = true
+	`
+	if err := db.Raw(query, bot.ID).Scan(&dbDocs).Error; err != nil {
+		log.Printf("⚠️  Failed to fetch bound documents for bot %s: %v", bot.ID, err)
+		// Return empty documents instead of error (bot might not have knowledge yet)
+		dbDocs = []models.AIDocument{}
 	}
 
 	// Convert to Document slice
@@ -163,7 +171,7 @@ func (p *DBProvider) GetBotSettings(userID, sessionToken string) (*BotSettings, 
 	systemPrompt := ""
 	if bot.SystemPrompt != nil {
 		systemPrompt = *bot.SystemPrompt
-		log.Printf("✅ Bot settings loaded: botID=%s, promptLength=%d chars, docs=%d",
+		log.Printf("✅ Bot settings loaded: botID=%s, promptLength=%d chars, boundDocs=%d",
 			bot.ID, len(systemPrompt), len(documents))
 	} else {
 		log.Printf("⚠️  No system prompt found for bot: %s", bot.ID)

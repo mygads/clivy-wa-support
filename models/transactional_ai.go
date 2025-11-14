@@ -71,3 +71,17 @@ type AIBotSessionBinding struct {
 func (AIBotSessionBinding) TableName() string {
 	return "AIBotSessionBinding"
 }
+
+// BotKnowledgeBinding matches Prisma model BotKnowledgeBinding
+type BotKnowledgeBinding struct {
+	ID         string    `gorm:"column:id;primaryKey" json:"id"`
+	BotID      string    `gorm:"column:botId;not null" json:"botId"`
+	DocumentID string    `gorm:"column:documentId;not null" json:"documentId"`
+	IsActive   bool      `gorm:"column:isActive;not null;default:true" json:"isActive"`
+	CreatedAt  time.Time `gorm:"column:createdAt;not null;default:now()" json:"createdAt"`
+	UpdatedAt  time.Time `gorm:"column:updatedAt;not null" json:"updatedAt"`
+}
+
+func (BotKnowledgeBinding) TableName() string {
+	return "BotKnowledgeBinding"
+}
