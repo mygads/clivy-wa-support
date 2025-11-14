@@ -191,6 +191,50 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	}
 	w.db.Create(&attempt)
 
+	// Get sender phone from chat message (we'll need this for typing indicator and auto-read)
+	var chatMsg models.AIChatMessage
+	err := w.db.Where("message_id = ?", job.MessageID).First(&chatMsg).Error
+	if err != nil {
+		w.failJob(job, &attempt, fmt.Sprintf("Failed to fetch chat message: %v", err))
+		return
+	}
+
+	// ASYNC: Auto-read ALL unread messages for this contact (AI bot feature - always enabled)
+	go func(sessionToken, senderPhone string) {
+		// Get all unread incoming messages for this session+sender
+		unreadMessages, err := services.GetUnreadIncomingMessages(sessionToken, senderPhone)
+		if err != nil {
+			log.Printf("⚠️  [AI Worker] Failed to get unread messages: %v", err)
+			return
+		}
+
+		if len(unreadMessages) == 0 {
+			return // No unread messages
+		}
+
+		// Extract message IDs
+		messageIDs := make([]string, len(unreadMessages))
+		for i, msg := range unreadMessages {
+			messageIDs[i] = msg.MessageID
+		}
+
+		// Clean phone number (remove @s.whatsapp.net suffix)
+		phoneNumber := strings.TrimSuffix(senderPhone, "@s.whatsapp.net")
+
+		log.Printf("📖 [AI Bot] Auto-reading %d unread messages for contact %s", len(messageIDs), phoneNumber)
+
+		// Call WA Server to mark as read
+		if err := services.MarkMessagesAsRead(sessionToken, messageIDs, phoneNumber); err != nil {
+			log.Printf("⚠️  [AI Bot] Failed to mark messages as read via WA Server: %v", err)
+			// Continue even if markread fails
+		}
+
+		// Update DB
+		if err := services.MarkMessagesAsReadInDB(messageIDs); err != nil {
+			log.Printf("⚠️  [AI Bot] Failed to mark messages as read in DB: %v", err)
+		}
+	}(job.SessionTok, chatMsg.From)
+
 	// 1. Build context (fetch bot settings + chat history)
 	maxMessages := 10
 	ctx, err := services.BuildContextWithLimit(job.UserID, job.SessionTok, job.MessageID, maxMessages)
@@ -202,6 +246,13 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	// Log system prompt preview for debugging
 	log.Printf("🤖 System prompt to LLM (first 400 chars): %s...", ctx.SystemPrompt[:min(400, len(ctx.SystemPrompt))])
 	log.Printf("💬 User message to LLM: %s", ctx.UserMessage)
+
+	// AI BOT: Show typing indicator BEFORE calling LLM (always enabled for AI)
+	phoneNumber := strings.TrimSuffix(chatMsg.From, "@s.whatsapp.net")
+	if err := services.SetTypingState(job.SessionTok, phoneNumber, "composing"); err != nil {
+		log.Printf("⚠️  [AI Bot] Failed to set typing state to composing: %v", err)
+		// Continue even if typing indicator fails
+	}
 
 	// 2. Call LLM with timeout and circuit breaker
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -218,20 +269,22 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	})
 
 	if cbErr != nil {
+		// Stop typing indicator on error
+		services.SetTypingState(job.SessionTok, phoneNumber, "stop")
+
 		// Parse error for intelligent handling
 		w.handleLLMError(job, &attempt, cbErr, maxMessages)
 		return
 	}
 
+	// AI BOT: Stop typing indicator AFTER LLM responds, BEFORE sending message
+	if err := services.SetTypingState(job.SessionTok, phoneNumber, "stop"); err != nil {
+		log.Printf("⚠️  [AI Bot] Failed to set typing state to stop: %v", err)
+	}
+
 	latency := time.Since(start).Milliseconds()
 
-	// 3. Get sender info from chat message
-	var chatMsg models.AIChatMessage
-	err = w.db.Where("message_id = ?", job.MessageID).First(&chatMsg).Error
-	if err != nil {
-		w.failJob(job, &attempt, fmt.Sprintf("Failed to fetch chat message: %v", err))
-		return
-	}
+	// 3. Sender info already fetched earlier (chatMsg variable)
 
 	// 4. Send reply via WA (using internal gateway)
 	err = services.SendWAText(job.SessionTok, chatMsg.From, response)
@@ -240,10 +293,25 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 		return
 	}
 
-	// 4b. Save AI response to permanent chat history
+	// 4b. Save AI response to AI chat history (for context builder) AND permanent chat history
 	go func() {
+		// Save to ai_chat_messages (for AI context) with FromMe=true, IsRead=true
+		// We don't have the actual message ID from WA server, so use a generated one
+		aiMsgID := fmt.Sprintf("ai_%s_%d", job.SessionTok, time.Now().UnixNano())
+		if err := services.SaveOutgoingMessageToAIChat(
+			job.SessionTok,
+			aiMsgID,
+			chatMsg.To,   // from (bot's JID)
+			chatMsg.From, // to (recipient)
+			response,     // body
+			time.Now(),   // timestamp
+		); err != nil {
+			log.Printf("⚠️  Failed to save AI response to AI chat messages: %v", err)
+		}
+
+		// Save to permanent chat_messages (for UI)
 		if err := services.SaveAIResponseToHistory(job.SessionTok, chatMsg.From, response); err != nil {
-			log.Printf("⚠️  Failed to save AI response to chat history: %v", err)
+			log.Printf("⚠️  Failed to save AI response to permanent chat history: %v", err)
 		}
 	}()
 
@@ -336,6 +404,27 @@ func (w *AIWorker) handleLLMError(job *models.AIJob, attempt *models.AIJobAttemp
 			w.failJob(job, attempt, fmt.Sprintf("Failed to send WA message: %v", err))
 			return
 		}
+
+		// Save AI response to ai_chat_messages AND permanent history
+		go func(sessionToken, recipientJID, responseText string) {
+			// Save to ai_chat_messages
+			aiMsgID := fmt.Sprintf("ai_%s_%d", sessionToken, time.Now().UnixNano())
+			if err := services.SaveOutgoingMessageToAIChat(
+				sessionToken,
+				aiMsgID,
+				chatMsg.To,
+				recipientJID,
+				responseText,
+				time.Now(),
+			); err != nil {
+				log.Printf("⚠️  Failed to save AI response to AI chat messages: %v", err)
+			}
+
+			// Save to permanent chat_messages
+			if err := services.SaveAIResponseToHistory(sessionToken, recipientJID, responseText); err != nil {
+				log.Printf("⚠️  Failed to save AI response to permanent chat history: %v", err)
+			}
+		}(job.SessionTok, chatMsg.From, response)
 
 		sendLog := models.MessageSendLog{
 			SessionTok: job.SessionTok,

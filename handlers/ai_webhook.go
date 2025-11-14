@@ -126,24 +126,11 @@ func HandleAIWebhook(c *gin.Context) {
 	}
 
 	// 4. Save incoming message (idempotency via unique messageID)
-	chatMsg := models.AIChatMessage{
-		MessageID:  messageID,
-		SessionTok: sessionToken,
-		From:       from,
-		To:         to,
-		FromMe:     false,
-		MsgType:    msgType,
-		Body:       body,
-		PushName:   pushName,
-		Timestamp:  timestamp,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-	}
-
-	db := database.GetDB()
-	if err := db.Create(&chatMsg).Error; err != nil {
-		// Duplicate message - idempotency check
-		if strings.Contains(err.Error(), "duplicate key") {
+	// Also triggers auto-cleanup (keep last 20 messages per contact)
+	phoneNumber := strings.Split(from, "@")[0] // Extract phone number without @s.whatsapp.net
+	if err := services.SaveIncomingMessageToAIChat(sessionToken, messageID, from, to, body, pushName, timestamp); err != nil {
+		// Check if duplicate
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") {
 			log.Printf("Duplicate message %s - skipped", messageID)
 			c.JSON(http.StatusOK, gin.H{"message": "Duplicate message"})
 			return
@@ -153,7 +140,7 @@ func HandleAIWebhook(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✓ Message saved to ai_chat_messages")
+	log.Printf("✓ Message saved to ai_chat_messages (contact: %s)", phoneNumber)
 
 	// 4b. Save to permanent chat history (ChatRoom + ChatMessage)
 	go func() {
@@ -163,6 +150,7 @@ func HandleAIWebhook(c *gin.Context) {
 	}()
 
 	// 5. Enqueue AI job
+	db := database.GetDB()
 	aiJob := models.AIJob{
 		Status:     "pending",
 		Priority:   5,

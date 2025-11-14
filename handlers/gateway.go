@@ -15,6 +15,7 @@ import (
 
 	"genfity-wa-support/database"
 	"genfity-wa-support/models"
+	"genfity-wa-support/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -320,13 +321,39 @@ func checkSessionLimits(userID string) error {
 
 // proxyToWAServerWithProcessing forwards the request to WhatsApp server with optional body processing
 func proxyToWAServerWithProcessing(c *gin.Context, targetPath string) int {
+	// Handle typing indicator and auto-read before sending message
+	if isMessageEndpoint(targetPath) && c.Request.Method == "POST" {
+		token := getTokenFromRequest(c)
+		if token != "" {
+			// Handle typing indicator (regular chat only, not AI)
+			handleTypingIndicatorBeforeSend(token, c)
+
+			// Auto-read incoming messages before sending (if enabled)
+			handleAutoReadBeforeSend(token, c)
+		}
+	}
+
 	// Check if this is an image endpoint that needs special processing
 	if targetPath == "/chat/send/image" && c.Request.Method == "POST" {
 		return proxyImageRequest(c, targetPath)
 	}
 
 	// For all other endpoints, use normal proxy
-	return proxyToWAServer(c, targetPath)
+	statusCode := proxyToWAServer(c, targetPath)
+
+	// Stop typing indicator and save outgoing message after successful send
+	if isMessageEndpoint(targetPath) && c.Request.Method == "POST" && statusCode >= 200 && statusCode < 300 {
+		token := getTokenFromRequest(c)
+		if token != "" {
+			// Stop typing indicator (regular chat only)
+			go handleTypingIndicatorAfterSend(token, c)
+
+			// Save outgoing message to DB
+			go handleSaveOutgoingMessage(token, c, statusCode)
+		}
+	}
+
+	return statusCode
 }
 
 // proxyImageRequest handles image endpoint with URL to base64 conversion
@@ -692,4 +719,214 @@ func trackMessageStats(userID, token, path string, c *gin.Context, success bool)
 	} else {
 		log.Printf("Failed to query message stats: %v", err)
 	}
+}
+
+// handleTypingIndicatorBeforeSend shows typing indicator if enabled (regular chat only, not AI)
+func handleTypingIndicatorBeforeSend(sessionToken string, c *gin.Context) {
+	// 1. Get session from transactional DB to check typingIndicator setting
+	var session models.WhatsappSession
+	if err := database.TransactionalDB.Where("token = ?", sessionToken).First(&session).Error; err != nil {
+		return // Silently skip if session not found
+	}
+
+	// 2. Check if typingIndicator is enabled
+	if !session.TypingIndicator {
+		return // Typing indicator disabled, skip
+	}
+
+	// 3. Parse request body to get target phone number
+	bodyBytes, err := c.GetRawData()
+	if err != nil {
+		return // Silently skip on error
+	}
+
+	// Restore body for next handler
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &reqData); err != nil {
+		return // Silently skip on error
+	}
+
+	// Extract phone number from "to" field
+	toField, ok := reqData["to"].(string)
+	if !ok {
+		return // No recipient, skip
+	}
+
+	// Clean phone number (remove @s.whatsapp.net suffix)
+	phoneNumber := strings.TrimSuffix(toField, "@s.whatsapp.net")
+
+	// 4. Set typing state to "composing"
+	if err := services.SetTypingState(sessionToken, phoneNumber, "composing"); err != nil {
+		log.Printf("⚠️  Failed to set typing state to composing: %v", err)
+		// Continue even if typing indicator fails
+	}
+
+	// 5. Delay 500ms before sending message
+	time.Sleep(500 * time.Millisecond)
+
+	// Note: "stop" typing state will be called after message is sent in proxyToWAServerWithProcessing
+}
+
+// handleTypingIndicatorAfterSend stops typing indicator after message is sent
+func handleTypingIndicatorAfterSend(sessionToken string, c *gin.Context) {
+	// 1. Get session to check if typing indicator was enabled
+	var session models.WhatsappSession
+	if err := database.TransactionalDB.Where("token = ?", sessionToken).First(&session).Error; err != nil {
+		return
+	}
+
+	if !session.TypingIndicator {
+		return // Not enabled, skip
+	}
+
+	// 2. Parse request body to get recipient phone
+	bodyBytes, err := c.GetRawData()
+	if err != nil {
+		return
+	}
+
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &reqData); err != nil {
+		return
+	}
+
+	toField, ok := reqData["to"].(string)
+	if !ok {
+		return
+	}
+
+	phoneNumber := strings.TrimSuffix(toField, "@s.whatsapp.net")
+
+	// 3. Set typing state to "stop"
+	if err := services.SetTypingState(sessionToken, phoneNumber, "stop"); err != nil {
+		log.Printf("⚠️  Failed to set typing state to stop: %v", err)
+	}
+}
+
+// handleAutoReadBeforeSend checks if auto-read is enabled and marks unread messages as read
+func handleAutoReadBeforeSend(sessionToken string, c *gin.Context) {
+	// 1. Get session from transactional DB to check autoReadMessages setting
+	var session models.WhatsappSession
+	if err := database.TransactionalDB.Where("token = ?", sessionToken).First(&session).Error; err != nil {
+		log.Printf("⚠️  Failed to get session for auto-read: %v", err)
+		return
+	}
+
+	// 2. Check if autoReadMessages is enabled
+	if !session.AutoReadMessages {
+		return // Auto-read disabled, skip
+	}
+
+	// 3. Parse request body to get target phone number
+	bodyBytes, err := c.GetRawData()
+	if err != nil {
+		log.Printf("⚠️  Failed to read request body for auto-read: %v", err)
+		return
+	}
+
+	// Restore body for next handler
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &reqData); err != nil {
+		log.Printf("⚠️  Failed to parse request for auto-read: %v", err)
+		return
+	}
+
+	// Extract phone number from "to" field
+	toField, ok := reqData["to"].(string)
+	if !ok {
+		log.Printf("⚠️  Missing 'to' field in request")
+		return
+	}
+
+	// Clean phone number (remove @s.whatsapp.net suffix)
+	phoneNumber := strings.TrimSuffix(toField, "@s.whatsapp.net")
+
+	// 4. Get unread incoming messages for this contact
+	unreadMessages, err := services.GetUnreadIncomingMessages(sessionToken, toField)
+	if err != nil {
+		log.Printf("⚠️  Failed to get unread messages: %v", err)
+		return
+	}
+
+	if len(unreadMessages) == 0 {
+		return // No unread messages, nothing to do
+	}
+
+	// 5. Extract message IDs
+	messageIDs := make([]string, len(unreadMessages))
+	for i, msg := range unreadMessages {
+		messageIDs[i] = msg.MessageID
+	}
+
+	log.Printf("📖 Auto-reading %d unread messages for contact %s", len(messageIDs), phoneNumber)
+
+	// 6. Call WA Server to mark messages as read
+	if err := services.MarkMessagesAsRead(sessionToken, messageIDs, phoneNumber); err != nil {
+		log.Printf("⚠️  Failed to mark messages as read via WA Server: %v", err)
+		// Continue even if markread fails
+	}
+
+	// 7. Update database to mark messages as read
+	if err := services.MarkMessagesAsReadInDB(messageIDs); err != nil {
+		log.Printf("⚠️  Failed to mark messages as read in DB: %v", err)
+	}
+}
+
+// handleSaveOutgoingMessage saves outgoing message to database after successful send
+func handleSaveOutgoingMessage(sessionToken string, c *gin.Context, statusCode int) {
+	// Parse request body to extract message details
+	bodyBytes, err := c.GetRawData()
+	if err != nil {
+		log.Printf("⚠️  Failed to read request body for save: %v", err)
+		return
+	}
+
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &reqData); err != nil {
+		log.Printf("⚠️  Failed to parse request for save: %v", err)
+		return
+	}
+
+	// Extract fields
+	to, _ := reqData["to"].(string)
+	var body string
+	if text, ok := reqData["text"].(string); ok {
+		body = text
+	} else if caption, ok := reqData["caption"].(string); ok {
+		body = caption
+	}
+
+	if to == "" || body == "" {
+		return // Skip if no valid data
+	}
+
+	// Get session JID as "from"
+	var session models.WhatsappSession
+	if err := database.TransactionalDB.Where("token = ?", sessionToken).First(&session).Error; err != nil {
+		log.Printf("⚠️  Failed to get session for save: %v", err)
+		return
+	}
+
+	var from string
+	if session.JID != nil && *session.JID != "" {
+		from = *session.JID
+	} else {
+		from = sessionToken // Fallback to token if JID not available
+	}
+
+	// Generate message ID (or extract from response if available)
+	messageID := fmt.Sprintf("%s_%d", sessionToken, time.Now().UnixNano())
+
+	// Save to database with cleanup
+	phoneNumber := strings.TrimSuffix(to, "@s.whatsapp.net")
+	if err := services.SaveOutgoingMessageToAIChat(sessionToken, messageID, from, to, body, time.Now()); err != nil {
+		log.Printf("⚠️  Failed to save outgoing message: %v", err)
+		return
+	}
+
+	log.Printf("✅ Saved outgoing message to %s (contact: %s)", to, phoneNumber)
 }

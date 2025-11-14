@@ -11,6 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const MaxMessagesPerContact = 20
+
 // SaveToChatHistory saves incoming/outgoing messages to permanent chat history
 // This is separate from ai_chat_messages which is temporary for AI context
 func SaveToChatHistory(sessionToken, senderJID, recipientJID, body, pushName string, timestamp time.Time, fromMe bool) error {
@@ -137,4 +139,159 @@ func getUnreadIncrement(fromMe bool) int {
 		return 0 // User's own messages don't increment unread
 	}
 	return 1 // Contact's messages increment unread
+}
+
+// ============= Auto Read Messages Functions =============
+
+// SaveIncomingMessageToAIChat menyimpan pesan masuk ke ai_chat_messages dengan auto-cleanup
+func SaveIncomingMessageToAIChat(sessionTok, messageID, from, to, body, pushName string, timestamp time.Time) error {
+	db := database.GetDB()
+
+	msg := models.AIChatMessage{
+		MessageID:  messageID,
+		SessionTok: sessionTok,
+		From:       from,
+		To:         to,
+		FromMe:     false,
+		MsgType:    "text",
+		Body:       body,
+		PushName:   pushName,
+		IsRead:     false,
+		Timestamp:  timestamp,
+	}
+
+	if err := db.Create(&msg).Error; err != nil {
+		return fmt.Errorf("failed to save incoming message: %w", err)
+	}
+
+	// Cleanup: hapus pesan lama, keep only last 20 per SessionTok+From
+	return CleanupOldAIChatMessages(sessionTok, from)
+}
+
+// SaveOutgoingMessageToAIChat menyimpan pesan keluar ke ai_chat_messages dengan auto-cleanup
+func SaveOutgoingMessageToAIChat(sessionTok, messageID, from, to, body string, timestamp time.Time) error {
+	db := database.GetDB()
+
+	msg := models.AIChatMessage{
+		MessageID:  messageID,
+		SessionTok: sessionTok,
+		From:       from,
+		To:         to,
+		FromMe:     true,
+		MsgType:    "text",
+		Body:       body,
+		IsRead:     true, // outgoing message selalu dianggap sudah read
+		Timestamp:  timestamp,
+	}
+
+	if err := db.Create(&msg).Error; err != nil {
+		return fmt.Errorf("failed to save outgoing message: %w", err)
+	}
+
+	// Cleanup: hapus pesan lama, keep only last 20 per SessionTok+To
+	return CleanupOldAIChatMessages(sessionTok, to)
+}
+
+// CleanupOldAIChatMessages hapus pesan lama, keep only last 20 per contact
+func CleanupOldAIChatMessages(sessionTok, contactPhone string) error {
+	db := database.GetDB()
+
+	// Count total messages for this session+contact combination
+	var count int64
+	err := db.Model(&models.AIChatMessage{}).
+		Where("session_tok = ? AND (\"from\" = ? OR \"to\" = ?)", sessionTok, contactPhone, contactPhone).
+		Count(&count).Error
+
+	if err != nil {
+		return fmt.Errorf("failed to count messages: %w", err)
+	}
+
+	if count <= MaxMessagesPerContact {
+		return nil // No cleanup needed
+	}
+
+	// Delete oldest messages, keeping only the last MaxMessagesPerContact
+	toDelete := count - MaxMessagesPerContact
+
+	// Get IDs of oldest messages to delete
+	var oldMessageIDs []uint
+	err = db.Model(&models.AIChatMessage{}).
+		Where("session_tok = ? AND (\"from\" = ? OR \"to\" = ?)", sessionTok, contactPhone, contactPhone).
+		Order("timestamp ASC").
+		Limit(int(toDelete)).
+		Pluck("id", &oldMessageIDs).Error
+
+	if err != nil {
+		return fmt.Errorf("failed to get old message IDs: %w", err)
+	}
+
+	if len(oldMessageIDs) > 0 {
+		err = db.Where("id IN ?", oldMessageIDs).Delete(&models.AIChatMessage{}).Error
+		if err != nil {
+			return fmt.Errorf("failed to delete old messages: %w", err)
+		}
+		log.Printf("🧹 Cleaned up %d old messages for session %s, contact %s", len(oldMessageIDs), sessionTok, contactPhone)
+	}
+
+	return nil
+}
+
+// GetUnreadIncomingMessages ambil pesan incoming yang belum di-read untuk contact tertentu
+func GetUnreadIncomingMessages(sessionTok, fromPhone string) ([]models.AIChatMessage, error) {
+	db := database.GetDB()
+
+	var messages []models.AIChatMessage
+	err := db.
+		Where("session_tok = ? AND \"from\" = ? AND from_me = ? AND is_read = ?", sessionTok, fromPhone, false, false).
+		Order("timestamp ASC").
+		Find(&messages).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get unread messages: %w", err)
+	}
+
+	return messages, nil
+}
+
+// MarkMessagesAsReadInDB update IsRead = true untuk message IDs tertentu
+func MarkMessagesAsReadInDB(messageIDs []string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	db := database.GetDB()
+	err := db.Model(&models.AIChatMessage{}).
+		Where("message_id IN ?", messageIDs).
+		Update("is_read", true).Error
+
+	if err != nil {
+		return fmt.Errorf("failed to mark messages as read in DB: %w", err)
+	}
+
+	log.Printf("✅ Marked %d messages as read in DB", len(messageIDs))
+	return nil
+}
+
+// GetChatHistoryForAI ambil riwayat chat untuk AI context (compatibility dengan AI worker)
+// Fungsi ini tetap digunakan oleh AI worker untuk build context
+func GetChatHistoryForAI(sessionTok, contactPhone string, limit int) ([]models.AIChatMessage, error) {
+	db := database.GetDB()
+
+	var messages []models.AIChatMessage
+	err := db.
+		Where("session_tok = ? AND (\"from\" = ? OR \"to\" = ?)", sessionTok, contactPhone, contactPhone).
+		Order("timestamp DESC").
+		Limit(limit).
+		Find(&messages).Error
+
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, fmt.Errorf("failed to get chat history: %w", err)
+	}
+
+	// Reverse untuk urutan ascending (oldest first)
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	return messages, nil
 }

@@ -6,23 +6,25 @@ import (
 
 // WhatsappSession model - sesuai dengan skema Prisma
 type WhatsappSession struct {
-	ID              string    `json:"id" gorm:"primaryKey;type:varchar(30);column:id"`
-	SessionID       string    `json:"sessionId" gorm:"unique;column:sessionId"`
-	SessionName     string    `json:"sessionName" gorm:"column:sessionName"`
-	Token           string    `json:"token" gorm:"unique;column:token"`
-	UserID          *string   `json:"userId" gorm:"column:userId;index"`
-	Webhook         *string   `json:"webhook" gorm:"column:webhook"`
-	Events          *string   `json:"events" gorm:"column:events"`
-	Expiration      int       `json:"expiration" gorm:"default:0;column:expiration"`
-	Connected       bool      `json:"connected" gorm:"default:false;column:connected"`
-	LoggedIn        bool      `json:"loggedIn" gorm:"default:false;column:loggedIn"`
-	JID             *string   `json:"jid" gorm:"column:jid"`
-	QRCode          *string   `json:"qrcode" gorm:"type:text;column:qrcode"`
-	Status          string    `json:"status" gorm:"default:disconnected;column:status"`
-	Message         *string   `json:"message" gorm:"column:message"`
-	IsSystemSession bool      `json:"isSystemSession" gorm:"default:false;column:isSystemSession"`
-	CreatedAt       time.Time `json:"createdAt" gorm:"autoCreateTime;column:createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt" gorm:"autoUpdateTime;column:updatedAt"`
+	ID               string    `json:"id" gorm:"primaryKey;type:varchar(30);column:id"`
+	SessionID        string    `json:"sessionId" gorm:"unique;column:sessionId"`
+	SessionName      string    `json:"sessionName" gorm:"column:sessionName"`
+	Token            string    `json:"token" gorm:"unique;column:token"`
+	UserID           *string   `json:"userId" gorm:"column:userId;index"`
+	Webhook          *string   `json:"webhook" gorm:"column:webhook"`
+	Events           *string   `json:"events" gorm:"column:events"`
+	Expiration       int       `json:"expiration" gorm:"default:0;column:expiration"`
+	Connected        bool      `json:"connected" gorm:"default:false;column:connected"`
+	LoggedIn         bool      `json:"loggedIn" gorm:"default:false;column:loggedIn"`
+	JID              *string   `json:"jid" gorm:"column:jid"`
+	QRCode           *string   `json:"qrcode" gorm:"type:text;column:qrcode"`
+	Status           string    `json:"status" gorm:"default:disconnected;column:status"`
+	Message          *string   `json:"message" gorm:"column:message"`
+	AutoReadMessages bool      `json:"autoReadMessages" gorm:"default:false;column:autoReadMessages"`
+	TypingIndicator  bool      `json:"typingIndicator" gorm:"default:false;column:typingIndicator"`
+	IsSystemSession  bool      `json:"isSystemSession" gorm:"default:false;column:isSystemSession"`
+	CreatedAt        time.Time `json:"createdAt" gorm:"autoCreateTime;column:createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt" gorm:"autoUpdateTime;column:updatedAt"`
 }
 
 // TableName specifies the table name for GORM

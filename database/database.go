@@ -149,7 +149,14 @@ func autoMigratePrimaryTables() error {
 			log.Printf("✓ Created table: %s", table.name)
 			migratedCount++
 		} else {
-			log.Printf("✓ Table '%s' already exists, skipping", table.name)
+			log.Printf("✓ Table '%s' already exists, checking for schema changes...", table.name)
+			// Auto-migrate existing table to add new columns
+			err := DB.AutoMigrate(table.model)
+			if err != nil {
+				log.Printf("⚠️  Warning: Failed to update schema for %s: %v", table.name, err)
+			} else {
+				log.Printf("✓ Schema updated for table: %s", table.name)
+			}
 			skippedCount++
 		}
 	}

@@ -14,6 +14,7 @@ type AIChatMessage struct {
 	MsgType    string    `gorm:"index;not null" json:"msg_type"`         // "text"
 	Body       string    `gorm:"type:text" json:"body"`
 	PushName   string    `json:"push_name"`
+	IsRead     bool      `gorm:"default:false;index" json:"is_read"` // sudah di-read atau belum
 	Timestamp  time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
