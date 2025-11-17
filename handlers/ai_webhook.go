@@ -101,6 +101,15 @@ func HandleAIWebhook(c *gin.Context) {
 
 	log.Printf("💬 Message content: %s", body)
 
+	// 1b. Filter old messages (prevent history replay)
+	// Only process messages from last 5 minutes
+	messageAge := time.Since(timestamp)
+	if messageAge > 5*time.Minute {
+		log.Printf("⏭️  Skipped old message: age=%v, messageID=%s", messageAge, messageID)
+		c.JSON(http.StatusOK, gin.H{"message": "Old message ignored"})
+		return
+	}
+
 	// 2. Resolve session → user (call Transactional API)
 	sessionInfo, err := services.ResolveSession(sessionToken)
 	if err != nil {
