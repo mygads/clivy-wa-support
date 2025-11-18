@@ -52,7 +52,10 @@ func main() {
 	go services.MonitorCredits()
 
 	// Start AI Worker in background with graceful shutdown support
-	aiWorker := worker.NewAIWorker()
+	aiWorker, err := worker.NewAIWorker()
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize AI Worker: %v", err)
+	}
 	go func() {
 		log.Println("Starting AI Worker...")
 		aiWorker.Start()

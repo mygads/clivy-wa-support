@@ -15,29 +15,34 @@ import (
 	"genfity-wa-support/services"
 
 	"github.com/lib/pq"
-	openai "github.com/sashabaranov/go-openai"
 	"gorm.io/gorm"
 )
 
-// Global circuit breaker for OpenRouter
-var openRouterCB = services.NewCircuitBreaker("openrouter", 5, 60*time.Second)
+// Global circuit breaker for AI providers
+var aiProviderCB = services.NewCircuitBreaker("ai_provider", 5, 60*time.Second)
 
 // AIWorker processes AI jobs from queue
 type AIWorker struct {
-	llmClient *openai.Client
-	db        *gorm.DB
-	listener  *pq.Listener
-	shutdown  chan struct{}
-	wg        sync.WaitGroup
+	aiProvider services.AIProvider
+	db         *gorm.DB
+	listener   *pq.Listener
+	shutdown   chan struct{}
+	wg         sync.WaitGroup
 }
 
 // NewAIWorker creates new AI worker instance
-func NewAIWorker() *AIWorker {
-	return &AIWorker{
-		llmClient: services.NewOpenRouterClient(),
-		db:        database.GetDB(),
-		shutdown:  make(chan struct{}),
+func NewAIWorker() (*AIWorker, error) {
+	// Get AI provider from factory (OpenRouter or Gemini based on config)
+	aiProvider, err := services.GetAIProvider()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize AI provider: %w", err)
 	}
+
+	return &AIWorker{
+		aiProvider: aiProvider,
+		db:         database.GetDB(),
+		shutdown:   make(chan struct{}),
+	}, nil
 }
 
 // Start begins the AI worker loop
@@ -261,10 +266,13 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	var response string
 	var inTok, outTok int
 
+	// Log provider being used
+	log.Printf("🤖 Using AI provider: %s (model: %s)", w.aiProvider.GetProviderName(), w.aiProvider.GetModelName())
+
 	// Use circuit breaker to prevent cascading failures
-	cbErr := openRouterCB.Call(func() error {
+	cbErr := aiProviderCB.Call(func() error {
 		var llmErr error
-		response, inTok, outTok, llmErr = services.AskLLM(timeoutCtx, w.llmClient, ctx.SystemPrompt, ctx.UserMessage)
+		response, inTok, outTok, llmErr = w.aiProvider.AskLLM(timeoutCtx, ctx.SystemPrompt, ctx.UserMessage)
 		return llmErr
 	})
 
@@ -277,6 +285,10 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 		return
 	}
 
+	// Format response for WhatsApp (convert markdown to WhatsApp formatting)
+	formattedResponse := services.FormatForWhatsApp(response)
+	log.Printf("✨ Formatted response for WhatsApp (%d -> %d chars)", len(response), len(formattedResponse))
+
 	// AI BOT: Stop typing indicator AFTER LLM responds, BEFORE sending message
 	if err := services.SetTypingState(job.SessionTok, phoneNumber, "stop"); err != nil {
 		log.Printf("⚠️  [AI Bot] Failed to set typing state to stop: %v", err)
@@ -287,39 +299,39 @@ func (w *AIWorker) processJob(job *models.AIJob) {
 	// 3. Sender info already fetched earlier (chatMsg variable)
 
 	// 4. Send reply via WA (using internal gateway)
-	err = services.SendWAText(job.SessionTok, chatMsg.From, response)
+	err = services.SendWAText(job.SessionTok, chatMsg.From, formattedResponse)
 	if err != nil {
 		w.failJob(job, &attempt, fmt.Sprintf("Failed to send WA message: %v", err))
 		return
 	}
 
 	// 4b. Save AI response to AI chat history (for context builder) AND permanent chat history
-	go func() {
+	go func(formattedResp string) {
 		// Save to ai_chat_messages (for AI context) with FromMe=true, IsRead=true
 		// We don't have the actual message ID from WA server, so use a generated one
 		aiMsgID := fmt.Sprintf("ai_%s_%d", job.SessionTok, time.Now().UnixNano())
 		if err := services.SaveOutgoingMessageToAIChat(
 			job.SessionTok,
 			aiMsgID,
-			chatMsg.To,   // from (bot's JID)
-			chatMsg.From, // to (recipient)
-			response,     // body
-			time.Now(),   // timestamp
+			chatMsg.To,    // from (bot's JID)
+			chatMsg.From,  // to (recipient)
+			formattedResp, // body (formatted for WhatsApp)
+			time.Now(),    // timestamp
 		); err != nil {
 			log.Printf("⚠️  Failed to save AI response to AI chat messages: %v", err)
 		}
 
 		// Save to permanent chat_messages (for UI)
-		if err := services.SaveAIResponseToHistory(job.SessionTok, chatMsg.From, response); err != nil {
+		if err := services.SaveAIResponseToHistory(job.SessionTok, chatMsg.From, formattedResp); err != nil {
 			log.Printf("⚠️  Failed to save AI response to permanent chat history: %v", err)
 		}
-	}()
+	}(formattedResponse)
 
 	// 5. Log sent message
 	sendLog := models.MessageSendLog{
 		SessionTok: job.SessionTok,
 		To:         chatMsg.From,
-		Body:       response,
+		Body:       formattedResponse,
 		Status:     "sent",
 		CreatedAt:  time.Now(),
 	}
@@ -379,9 +391,9 @@ func (w *AIWorker) handleLLMError(job *models.AIJob, attempt *models.AIJobAttemp
 		var response string
 		var inTok, outTok int
 
-		cbErr := openRouterCB.Call(func() error {
+		cbErr := aiProviderCB.Call(func() error {
 			var llmErr error
-			response, inTok, outTok, llmErr = services.AskLLM(timeoutCtx, w.llmClient, smallerCtx.SystemPrompt, smallerCtx.UserMessage)
+			response, inTok, outTok, llmErr = w.aiProvider.AskLLM(timeoutCtx, smallerCtx.SystemPrompt, smallerCtx.UserMessage)
 			return llmErr
 		})
 
@@ -400,7 +412,10 @@ func (w *AIWorker) handleLLMError(job *models.AIJob, attempt *models.AIJobAttemp
 			return
 		}
 
-		if err := services.SendWAText(job.SessionTok, chatMsg.From, response); err != nil {
+		// Format response for WhatsApp
+		formattedResponse := services.FormatForWhatsApp(response)
+
+		if err := services.SendWAText(job.SessionTok, chatMsg.From, formattedResponse); err != nil {
 			w.failJob(job, attempt, fmt.Sprintf("Failed to send WA message: %v", err))
 			return
 		}
@@ -424,12 +439,12 @@ func (w *AIWorker) handleLLMError(job *models.AIJob, attempt *models.AIJobAttemp
 			if err := services.SaveAIResponseToHistory(sessionToken, recipientJID, responseText); err != nil {
 				log.Printf("⚠️  Failed to save AI response to permanent chat history: %v", err)
 			}
-		}(job.SessionTok, chatMsg.From, response)
+		}(job.SessionTok, chatMsg.From, formattedResponse)
 
 		sendLog := models.MessageSendLog{
 			SessionTok: job.SessionTok,
 			To:         chatMsg.From,
-			Body:       response,
+			Body:       formattedResponse,
 			Status:     "sent",
 			CreatedAt:  time.Now(),
 		}

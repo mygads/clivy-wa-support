@@ -3,17 +3,39 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 )
 
+// OpenRouterClient wraps OpenAI-compatible client for OpenRouter
+type OpenRouterClient struct {
+	client  *openai.Client
+	model   string
+	timeout time.Duration
+}
+
 // NewOpenRouterClient creates OpenAI-compatible client for OpenRouter
-func NewOpenRouterClient() *openai.Client {
+func NewOpenRouterClient() (*OpenRouterClient, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
-		panic("OPENROUTER_API_KEY is required")
+		return nil, fmt.Errorf("OPENROUTER_API_KEY not set in environment")
+	}
+
+	model := os.Getenv("OPENROUTER_MODEL")
+	if model == "" {
+		model = "openai/gpt-4o-mini" // default model
+	}
+
+	timeoutMs := 120000 // default 120 seconds
+	if t := os.Getenv("AI_TIMEOUT_MS"); t != "" {
+		if parsed, err := strconv.Atoi(t); err == nil {
+			timeoutMs = parsed
+		}
 	}
 
 	cfg := openai.DefaultConfig(apiKey)
@@ -38,7 +60,15 @@ func NewOpenRouterClient() *openai.Client {
 		},
 	}
 
-	return openai.NewClientWithConfig(cfg)
+	client := openai.NewClientWithConfig(cfg)
+
+	log.Printf("[OpenRouterClient] Initialized with model=%s, timeout=%dms", model, timeoutMs)
+
+	return &OpenRouterClient{
+		client:  client,
+		model:   model,
+		timeout: time.Duration(timeoutMs) * time.Millisecond,
+	}, nil
 }
 
 // openRouterTransport adds custom headers
@@ -55,14 +85,15 @@ func (t *openRouterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 }
 
 // AskLLM sends prompt to LLM and returns response with token counts
-func AskLLM(ctx context.Context, client *openai.Client, systemPrompt, userMessage string) (string, int, int, error) {
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = "openai/gpt-4o-mini"
-	}
+func (orc *OpenRouterClient) AskLLM(ctx context.Context, systemPrompt, userMessage string) (string, int, int, error) {
+	// Create context with timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, orc.timeout)
+	defer cancel()
+
+	startTime := time.Now()
 
 	req := openai.ChatCompletionRequest{
-		Model: model,
+		Model: orc.model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: userMessage},
@@ -70,10 +101,12 @@ func AskLLM(ctx context.Context, client *openai.Client, systemPrompt, userMessag
 		Temperature: 0.3,
 	}
 
-	resp, err := client.CreateChatCompletion(ctx, req)
+	resp, err := orc.client.CreateChatCompletion(timeoutCtx, req)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, fmt.Errorf("OpenRouter API error: %w", err)
 	}
+
+	latency := time.Since(startTime).Milliseconds()
 
 	if len(resp.Choices) == 0 {
 		return "", 0, 0, fmt.Errorf("no response from LLM")
@@ -83,5 +116,18 @@ func AskLLM(ctx context.Context, client *openai.Client, systemPrompt, userMessag
 	inputTokens := resp.Usage.PromptTokens
 	outputTokens := resp.Usage.CompletionTokens
 
+	log.Printf("[OpenRouterClient] Success | model=%s | latency=%dms | in=%d | out=%d | total=%d",
+		orc.model, latency, inputTokens, outputTokens, inputTokens+outputTokens)
+
 	return output, inputTokens, outputTokens, nil
+}
+
+// GetProviderName returns the provider name for logging
+func (orc *OpenRouterClient) GetProviderName() string {
+	return "openrouter"
+}
+
+// GetModelName returns the model name being used
+func (orc *OpenRouterClient) GetModelName() string {
+	return orc.model
 }
